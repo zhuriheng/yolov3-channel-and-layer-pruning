@@ -286,7 +286,7 @@ def train():
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         model.train()
         #print('learning rate:',optimizer.param_groups[0]['lr'])
-        print(('\n' + '%10s' * 9) % ('Epoch', 'gpu_mem', 'GIoU', 'obj', 'cls', 'total', 'soft', 'targets', 'img_size'))
+        print(('\n' + '%10s' * 10) % ('Epoch', 'gpu_mem', 'GIoU', 'obj', 'cls', 'total', 'soft', 'rratio', 'targets', 'img_size'))
 
         # Freeze backbone at epoch 0, unfreeze at epoch 1 (optional)
         freeze_backbone = False
@@ -305,7 +305,6 @@ def train():
         msoft_target = torch.zeros(1).to(device)
         pbar = tqdm(enumerate(dataloader), total=nb)  # progress bar
         sr_flag = get_sr_flag(epoch, opt.sr)
-        idx2mask = None
         for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
 
@@ -355,13 +354,16 @@ def train():
                 return results
 
             soft_target = 0
+            reg_ratio = 0  #表示有多少target的回归是不如老师的，这时学生会跟gt再学习
             if t_cfg:
                 if mixed_precision:
                     with torch.no_grad():
                         output_t = t_model(imgs)
                 else:
                     _, output_t = t_model(imgs)
-                soft_target = distillation_loss1(pred, output_t, model.nc, imgs.size(0))
+                #soft_target = distillation_loss1(pred, output_t, model.nc, imgs.size(0))
+                #这里把蒸馏策略改为了二，想换回一的可以注释掉loss2，把loss1取消注释
+                soft_target, reg_ratio = distillation_loss2(model, targets, pred, output_t)
                 loss += soft_target
 
             # Scale loss by nominal batch_size of 64
@@ -373,8 +375,12 @@ def train():
                     scaled_loss.backward()
             else:
                 loss.backward()
+                
+            idx2mask = None
+            # if opt.sr and opt.prune==1 and epoch > opt.epochs * 0.5:
+            #     idx2mask = get_mask2(model, prune_idx, 0.85)
 
-            BNOptimizer.updateBN(sr_flag, model.module_list, opt.s, prune_idx, idx2mask)
+            BNOptimizer.updateBN(sr_flag, model.module_list, opt.s, prune_idx, epoch, idx2mask, opt)
 
             # Accumulate gradient for x batches before optimizing
             if ni % accumulate == 0:
@@ -385,8 +391,8 @@ def train():
             mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
             msoft_target = (msoft_target * i + soft_target) / (i + 1)
             mem = torch.cuda.memory_cached() / 1E9 if torch.cuda.is_available() else 0  # (GB)
-            s = ('%10s' * 2 + '%10.3g' * 7) % (
-                '%g/%g' % (epoch, epochs - 1), '%.3gG' % mem, *mloss, msoft_target,len(targets), img_size)
+            s = ('%10s' * 2 + '%10.3g' * 8) % (
+                '%g/%g' % (epoch, epochs - 1), '%.3gG' % mem, *mloss, msoft_target, reg_ratio, len(targets), img_size)
             pbar.set_description(s)
 
             # end batch ------------------------------------------------------------------------------------------------
@@ -515,6 +521,7 @@ if __name__ == '__main__':
                         help='train with channel sparsity regularization')
     parser.add_argument('--s', type=float, default=0.001, help='scale sparse rate')
     parser.add_argument('--prune', type=int, default=1, help='0:nomal prune 1:other prune ')
+    
     
     opt = parser.parse_args()
     opt.weights = last if opt.resume else opt.weights

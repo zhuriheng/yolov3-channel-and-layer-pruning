@@ -36,6 +36,8 @@ def create_modules(module_defs, img_size, arc):
                 modules.add_module('activation', nn.LeakyReLU(0.1, inplace=True))
                 # modules.add_module('activation', nn.PReLU(num_parameters=1, init=0.10))
                 # modules.add_module('activation', Swish())
+            elif mdef['activation'] == 'mish':
+                modules.add_module('activation', Mish())
 
         elif mdef['type'] == 'maxpool':
             kernel_size = int(mdef['size'])
@@ -53,6 +55,8 @@ def create_modules(module_defs, img_size, arc):
         elif mdef['type'] == 'route':  # nn.Sequential() placeholder for 'route' layer
             layers = [int(x) for x in mdef['layers'].split(',')]
             filters = sum([output_filters[i + 1 if i > 0 else i] for i in layers])
+            if 'groups' in mdef:
+                filters = filters // 2
             routs.extend([l if l > 0 else l + i for l in layers])
             # if mdef[i+1]['type'] == 'reorg3d':
             #     modules = nn.Upsample(scale_factor=1/float(mdef[i+1]['stride']), mode='nearest')  # reorg3d
@@ -119,6 +123,11 @@ class Swish(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(x)
 
+    
+class Mish(nn.Module):  # https://github.com/digantamisra98/Mish
+    def forward(self, x):
+        return x.mul(torch.tanh(F.softplus(x)))
+    
 
 class YOLOLayer(nn.Module):
     def __init__(self, anchors, nc, img_size, yolo_index, arc):
@@ -231,6 +240,8 @@ class Darknet(nn.Module):
                 layers = [int(x) for x in mdef['layers'].split(',')]
                 if len(layers) == 1:
                     x = layer_outputs[layers[0]]
+                    if 'groups' in mdef:
+                        x = x[:, (x.shape[1]//2):]
                 else:
                     try:
                         x = torch.cat([layer_outputs[i] for i in layers], 1)
@@ -302,6 +313,8 @@ def load_darknet_weights(self, weights, cutoff=-1):
         cutoff = 75
     elif file == 'yolov3-tiny.conv.15':
         cutoff = 15
+    elif file == 'yolov4-tiny.conv.29':
+        cutoff = 29
 
     # Read weights file
     with open(weights, 'rb') as f:
@@ -341,7 +354,7 @@ def load_darknet_weights(self, weights, cutoff=-1):
                 conv_layer.weight.data.copy_(conv_w)
                 ptr += num_w
             else:
-                if os.path.basename(file) == 'yolov3.weights' or os.path.basename(file) == 'yolov3-tiny.weights' or os.path.basename(file) == 'yolov3-spp.weights':
+                if os.path.basename(file) == 'yolov3.weights' or os.path.basename(file) == 'yolov3-tiny.weights' or os.path.basename(file) == 'yolov3-spp.weights' or os.path.basename(file) == 'yolov4.weights':
                     #加载权重'yolov3.weights' 或者 'yolov3-tiny-weights.' 是为了更好初始化自己模型权重，要避免同名
                     num_b = 255
                     ptr += num_b
